@@ -8,7 +8,7 @@ use reqwest::{
     Client, Error as ReqwestError,
 };
 use std::num::ParseIntError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
@@ -70,6 +70,12 @@ pub struct ApiBuilder {
     max_retries: usize,
 }
 
+impl Default for ApiBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ApiBuilder {
     pub fn new() -> Self {
         let cache_dir = match std::env::var("HF_HOME") {
@@ -86,7 +92,7 @@ impl ApiBuilder {
         let token = match std::fs::read_to_string(token_filename) {
             Ok(token_content) => {
                 let token_content = token_content.trim();
-                if token_content.len() > 0 {
+                if !token_content.is_empty() {
                     Some(token_content.to_string())
                 } else {
                     None
@@ -107,8 +113,8 @@ impl ApiBuilder {
         }
     }
 
-    pub fn with_cache_dir(mut self, cache_dir: &PathBuf) -> Self {
-        self.cache_dir = cache_dir.clone();
+    pub fn with_cache_dir(mut self, cache_dir: &Path) -> Self {
+        self.cache_dir = cache_dir.to_path_buf();
         self
     }
 
@@ -218,7 +224,7 @@ impl Api {
             .to_str()?;
 
         let size = content_range
-            .split("/")
+            .split('/')
             .last()
             .ok_or(ApiError::InvalidHeader(CONTENT_RANGE))?
             .parse()?;
