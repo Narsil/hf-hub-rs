@@ -8,12 +8,22 @@ edition = "2021"
 [dependencies]
 dirs = "5.0.1"
 fs2 = "0.4.3"
-futures = "0.3.28"
 rand = "0.8.5"
-reqwest = "0.11.18"
 thiserror = "1.0.40"
-tokio = { version = "1.28.2", features = ["fs"] }
+futures = { version = "0.3.28", optional = true }
+reqwest = { version = "0.11.18", optional = true, features = ["json"] }
+tokio = { version = "1.28.2", features = ["fs"], optional = true }
+serde = { version = "1.0.164", features = ["derive"], optional = true }
+serde_json = { version = "1.0.97", optional = true }
 
 [dev-dependencies]
 rand = "0.8.5"
+sha256 = "1.1.4"
 tokio = { version = "1.28.2", features = ["macros"] }
+tokio-test = "0.4.2"
+
+[features]
+default = ["online"]
+online = ["reqwest", "tokio", "futures", "serde", "serde_json"]
+
+
