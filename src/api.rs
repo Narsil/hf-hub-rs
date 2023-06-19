@@ -1,5 +1,6 @@
 use crate::{Repo, NAME, VERSION};
 use fs2::FileExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use reqwest::{
     header::{
@@ -88,6 +89,7 @@ pub struct ApiBuilder {
     chunk_size: usize,
     parallel_failures: usize,
     max_retries: usize,
+    progress: bool,
 }
 
 impl Default for ApiBuilder {
@@ -126,6 +128,8 @@ impl ApiBuilder {
             Err(_) => None,
         };
 
+        let progress = true;
+
         Self {
             endpoint: "https://huggingface.co".to_string(),
             url_template: "{endpoint}/{repo_id}/resolve/{revision}/{filename}".to_string(),
@@ -135,7 +139,14 @@ impl ApiBuilder {
             chunk_size: 10_000_000,
             parallel_failures: 0,
             max_retries: 0,
+            progress,
         }
+    }
+
+    /// Wether to show a progressbar
+    pub fn with_progress(mut self, progress: bool) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Changes the location of the cache directory. Defaults is `~/.cache/huggingface/`.
@@ -170,11 +181,13 @@ impl ApiBuilder {
             url_template: self.url_template,
             cache_dir: self.cache_dir,
             client,
+
             no_redirect_client,
             max_files: self.max_files,
             chunk_size: self.chunk_size,
             parallel_failures: self.parallel_failures,
             max_retries: self.max_retries,
+            progress: self.progress,
         })
     }
 }
@@ -199,6 +212,7 @@ pub struct Api {
     chunk_size: usize,
     parallel_failures: usize,
     max_retries: usize,
+    progress: bool,
 }
 
 fn temp_filename() -> PathBuf {
@@ -277,7 +291,15 @@ impl Api {
         ApiBuilder::new().build()
     }
 
-    fn url(&self, repo: &Repo, filename: &str) -> String {
+    /// Get the fully qualified URL of the remote filename
+    /// ```
+    /// # use hf_hub::{api::Api, Repo};
+    /// let api = Api::new().unwrap();
+    /// let repo = Repo::model("gpt2".to_string());
+    /// let url = api.url(&repo, "model.safetensors");
+    /// assert_eq!(url, "https://huggingface.co/gpt2/resolve/main/model.safetensors");
+    /// ```
+    pub fn url(&self, repo: &Repo, filename: &str) -> String {
         let endpoint = &self.endpoint;
         let revision = &repo.url_revision();
         self.url_template
@@ -285,6 +307,12 @@ impl Api {
             .replace("{repo_id}", &repo.url())
             .replace("{revision}", revision)
             .replace("{filename}", filename)
+    }
+
+    /// Get the underlying api client
+    /// Allows for lower level access
+    pub fn client(&self) -> &Client {
+        &self.client
     }
 
     async fn metadata(&self, url: &str) -> Result<Metadata, ApiError> {
@@ -343,7 +371,12 @@ impl Api {
         })
     }
 
-    async fn download_tempfile(&self, url: &str, length: usize) -> Result<PathBuf, ApiError> {
+    async fn download_tempfile(
+        &self,
+        url: &str,
+        length: usize,
+        progressbar: Option<ProgressBar>,
+    ) -> Result<PathBuf, ApiError> {
         let mut handles = vec![];
         let semaphore = Arc::new(Semaphore::new(self.max_files));
         let parallel_failures_semaphore = Arc::new(Semaphore::new(self.parallel_failures));
@@ -360,6 +393,7 @@ impl Api {
             let parallel_failures = self.parallel_failures;
             let max_retries = self.max_retries;
             let parallel_failures_semaphore = parallel_failures_semaphore.clone();
+            let progress = progressbar.clone();
             handles.push(tokio::spawn(async move {
                 let mut chunk = Self::download_chunk(&client, &url, &filename, start, stop).await;
                 let mut i = 0;
@@ -381,6 +415,7 @@ impl Api {
                     }
                 }
                 drop(permit);
+                progress.map(|p| p.inc((stop - start) as u64));
                 chunk
             }));
         }
@@ -390,6 +425,7 @@ impl Api {
             futures::future::join_all(handles).await;
         let results: Result<(), ApiError> = results.into_iter().flatten().collect();
         results?;
+        progressbar.map(|p| p.finish());
         Ok(filename)
     }
 
@@ -424,10 +460,10 @@ impl Api {
     /// This functions require internet access to verify if new versions of the file
     /// exist, even if a file is already on disk at location.
     /// ```no_run
-    /// # use hf_hub::{api::ApiBuilder, Repo, RepoType};
+    /// # use hf_hub::{api::ApiBuilder, Repo};
     /// # tokio_test::block_on(async {
     /// let api = ApiBuilder::new().build().unwrap();
-    /// let repo = Repo::new("gpt2".to_string(), RepoType::Model);
+    /// let repo = Repo::model("gpt2".to_string());
     /// let local_filename = api.download(&repo, "model.safetensors").await.unwrap();
     /// # })
     /// ```
@@ -450,7 +486,29 @@ impl Api {
             .open(&blob_path)?;
         file1.lock_exclusive()?;
 
-        let tmp_filename = self.download_tempfile(&url, metadata.size).await?;
+        let progressbar = if self.progress {
+            let progress = ProgressBar::new(metadata.size as u64);
+            progress.set_style(
+                ProgressStyle::with_template(
+                    "{msg} [{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} {bytes_per_sec} ({eta})",
+                )
+                .unwrap(), // .progress_chars("━ "),
+            );
+            let maxlength = 30;
+            let message = if filename.len() > maxlength {
+                format!("..{}", &filename[filename.len() - maxlength..])
+            } else {
+                format!("{filename}")
+            };
+            progress.set_message(message);
+            Some(progress)
+        } else {
+            None
+        };
+
+        let tmp_filename = self
+            .download_tempfile(&url, metadata.size, progressbar)
+            .await?;
         std::fs::copy(tmp_filename, &blob_path)?;
 
         let mut pointer_path = folder.clone();
@@ -466,10 +524,10 @@ impl Api {
 
     /// Get information about the Repo
     /// ```
-    /// # use hf_hub::{api::Api, Repo, RepoType};
+    /// # use hf_hub::{api::Api, Repo};
     /// # tokio_test::block_on(async {
     /// let api = Api::new().unwrap();
-    /// let repo = Repo::new("gpt2".to_string(), RepoType::Model);
+    /// let repo = Repo::model("gpt2".to_string());
     /// api.info(&repo);
     /// # })
     /// ```
@@ -518,7 +576,11 @@ mod tests {
     #[tokio::test]
     async fn simple() {
         let tmp = TempDir::new();
-        let api = ApiBuilder::new().with_cache_dir(&tmp.path).build().unwrap();
+        let api = ApiBuilder::new()
+            .with_progress(false)
+            .with_cache_dir(&tmp.path)
+            .build()
+            .unwrap();
         let repo = Repo::new("julien-c/dummy-unknown".to_string(), RepoType::Model);
         let downloaded_path = api.download(&repo, "config.json").await.unwrap();
         assert!(downloaded_path.exists());
@@ -532,7 +594,11 @@ mod tests {
     #[tokio::test]
     async fn dataset() {
         let tmp = TempDir::new();
-        let api = ApiBuilder::new().with_cache_dir(&tmp.path).build().unwrap();
+        let api = ApiBuilder::new()
+            .with_progress(false)
+            .with_cache_dir(&tmp.path)
+            .build()
+            .unwrap();
         let repo = Repo::with_revision(
             "wikitext".to_string(),
             RepoType::Dataset,
@@ -553,14 +619,17 @@ mod tests {
     #[tokio::test]
     async fn info() {
         let tmp = TempDir::new();
-        let api = ApiBuilder::new().with_cache_dir(&tmp.path).build().unwrap();
+        let api = ApiBuilder::new()
+            .with_progress(false)
+            .with_cache_dir(&tmp.path)
+            .build()
+            .unwrap();
         let repo = Repo::with_revision(
             "wikitext".to_string(),
             RepoType::Dataset,
             "refs/convert/parquet".to_string(),
         );
         let model_info = api.info(&repo).await.unwrap();
-        println!("Model info {model_info:#?}");
         assert_eq!(
             model_info,
             ModelInfo {

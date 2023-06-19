@@ -15,6 +15,7 @@ reqwest = { version = "0.11.18", optional = true, features = ["json"] }
 tokio = { version = "1.28.2", features = ["fs"], optional = true }
 serde = { version = "1.0.164", features = ["derive"], optional = true }
 serde_json = { version = "1.0.97", optional = true }
+indicatif = { version = "0.17.5", optional = true }
 
 [dev-dependencies]
 rand = "0.8.5"
@@ -24,6 +25,6 @@ tokio-test = "0.4.2"
 
 [features]
 default = ["online"]
-online = ["reqwest", "tokio", "futures", "serde", "serde_json"]
+online = ["reqwest", "tokio", "futures", "serde", "serde_json", "indicatif"]
 
 

@@ -52,6 +52,21 @@ impl Repo {
         }
     }
 
+    /// Shortcut for [`Repo::new`] with [`RepoType::Model`]
+    pub fn model(repo_id: String) -> Self {
+        Self::new(repo_id, RepoType::Model)
+    }
+
+    /// Shortcut for [`Repo::new`] with [`RepoType::Dataset`]
+    pub fn dataset(repo_id: String) -> Self {
+        Self::new(repo_id, RepoType::Dataset)
+    }
+
+    /// Shortcut for [`Repo::new`] with [`RepoType::Space`]
+    pub fn space(repo_id: String) -> Self {
+        Self::new(repo_id, RepoType::Space)
+    }
+
     /// The normalized folder nameof the repo within the cache directory
     pub fn folder_name(&self) -> String {
         match self.repo_type {
